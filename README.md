@@ -16,7 +16,7 @@ Because of the way zinc tends to form dendrites when it is electroplated onto an
 
 If you have only one Redflow battery, it will generally discharge to the grid. This script monitors the Redflow battery to determine when it is about to start a maintenance discharge, and tells the Victron EV charger to start charging the car at 6 amps (approximately 1.4 kW on a 230 volt system). This will, assuming a properly configured system, encourage the battery to discharge at a higher rate, with most of the discharged energy going into the EV rather than being sent to the electrical grid.
 
-The value in this script is mostly for those who have a single Redflow ZBM, and a relatively low (less than 1 kW) typical overnight load. It will reduce the time required for the maintenance discharge (a big plus in summer, when the time available is often too short for maintenance to finish before the sun rises again), increase the energy efficiency of the battery (as there is a constant ~70 watt load for the battery pumps that becomes significant for low load levels), and increase the personal energy return from the solar system.
+The value in this script is mostly for those who have a single Redflow ZBM, and a relatively low (less than 1 kW) typical overnight load. It will reduce the time required for the maintenance discharge (a big plus in summer, when the time available is often too short for maintenance to finish before the sun rises again), increase the energy efficiency of the battery (as there is a constant ~70 watt vampiric load for the battery pumps that becomes significant for low load levels), and increase the personal energy return from the solar system.
 
 Note that this script is untested in systems running multiple ZBMs.
 
