@@ -1,0 +1,6 @@
+Miscellaneous things that probably should be done at some point.
+
+ - Modify to query load on L2 and L3, not just L1.
+ - Modify to handle more than one battery in the system.
+ - Query the ZBM using Modbus rather than the JSON REST API. (Mostly
+   to reduce the number of third party libraries this script relies on.)

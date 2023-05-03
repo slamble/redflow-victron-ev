@@ -11,9 +11,9 @@ VictronEVChargerIP = '192.168.50.229' # The IP address of your EV charger
 VictronCerboIP = '192.168.50.206'     # The IP address of the Cerbo GX
 ZBM_IP = '192.168.50.109'             # The IP address of the Redflow BMS
 ZBM_min_discharge_level = 10 	      # Minimum percentage capacity for EV charging. Below this, the charger is turned off.
-# status["list"][0]["state_of_charge"] - 1 decimal
-AC_load_max_discharge = 2500 # Watts - the maximum load before the charger is turned off
-AC_load_min_discharge = 1000 # Watts - the minimum load; if the load is below that mark, the charger is turned on.
+AC_load_max_discharge = 2500          # Watts - the maximum load before the charger is turned off
+AC_load_min_discharge = 1000          # Watts - the minimum load; if the load is below that mark, the charger is turned on.
+ChargeCurrent = 6                     # Amps. Multiply by your voltage to get the watts (230*6 = 1380 watts in Australia.)
 
 # ===== User-adjustable parameters end here =====
 
@@ -26,7 +26,12 @@ Reg_CerboACLoadL1 = 817 # Load on first phase (watts)
 Reg_CerboACLoadL2 = 818 # Load on second phase (watts)
 Reg_CerboACLoadL3 = 819 # Load on third phase (watts)
 
-class EVChargerState(Enum):  # For register 5015
+from datetime import datetime
+def log(str):
+  now = datetime.now()
+  timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+
+class EVChargerState(int, Enum):  # For register 5015
   DISCONNECTED = 0
   CONNECTED = 1
   CHARGING = 2
@@ -34,12 +39,12 @@ class EVChargerState(Enum):  # For register 5015
   WAITING_FOR_SUN = 4
   WAITING_FOR_START = 6
 
-class EVChargingState(Enum): # For register 5009
+class EVChargingState(int, Enum): # For register 5009
   MANUAL = 0
   AUTO = 1
   SCHEDULED = 2
 
-class EVStartStopCharging(Enum): # For register 5010
+class EVStartStopCharging(int, Enum): # For register 5010
   STOP = 0
   START = 1
 
@@ -50,13 +55,6 @@ charger_client.connect()
 cerbo_client = ModbusTcpClient(VictronCerboIP)
 cerbo_client.connect()
 
-# x=client.read_holding_registers(5015)
-# x.registers - gives the registers returned by read_holding_registers
-# client.write_register(5009,1) - set charging to auto
-
-# write_register(5016,6) - set charging current to 6 amps (= 1.5 kW)
-
-# json["list"][0]["is_stripping"]
 def get_zbm_status():
   data = requests.get('http://' + ZBM_IP + ':3000/rest/1.0/status')
   json = data.json()
@@ -97,20 +95,21 @@ def is_stripping():
 
 def poll_for_strip():
   while not is_stripping():
-    print("Not stripping, sleeping for five minutes.")
+    log("Not stripping, sleeping for five minutes.")
     time.sleep(300) # Wait five minutes.
 
 def poll_for_charge_stop():
   current_charge = get_current_charge_level()
   current_load = get_current_load()
+  log("Current charge level is " + str(current_charge) + ", current load is " + str(current_load))
   while (current_charge >= ZBM_min_discharge_level) and (current_load <= AC_load_max_discharge):
-    print("Current charge level is " + str(current_charge) + ", current load is " + str(current_load))
     time.sleep(300)
     current_charge = get_current_charge_level()
     current_load = get_current_load()
+    log("Current charge level is " + str(current_charge) + ", current load is " + str(current_load))
 
 def is_ev_plugged_in():
-  state = charger_client.read_holding_register(Reg_VictronEVChargerState)
+  state = charger_client.read_holding_registers(Reg_VictronEVChargerState)
   data = state.registers[0]
   valid_states = [ EVChargerState.CONNECTED, EVChargerState.CHARGING, EVChargerState.WAITING_FOR_SUN, EVChargerState.WAITING_FOR_START ]
   if data in valid_states:
@@ -129,14 +128,15 @@ def is_ev_plugged_in():
 #     Charge below required level
 #       -> stop charging
 
-print("Initiating poll for maintenance cycle.")
-while true:
+log("Initiating poll for maintenance cycle.")
+while True:
   poll_for_strip()
-  print("Maintenance time has arrived; checking for valid charging conditions.")
+  log("Maintenance time has arrived; checking for valid charging conditions.")
   while is_stripping():
     current_charge = get_current_charge_level()
     current_load = get_current_load()
     if current_charge < ZBM_min_discharge_level:
+      log("Battery level has dropped below threshold. Waiting for maintenance to finish.")
       while is_stripping():
         # We could just sleep and leave the is_stripping() check to the outer loop, but we know the battery
         # has dropped to a low level of charge. Loop here until maintenance finishes. One hour sleep is a good
@@ -145,13 +145,16 @@ while true:
     else:
       # Maintenance is on, and the battery has enough charge.
       if not is_ev_plugged_in():
+        log("EV is not plugged in.")
         time.sleep(300) # Nothing we can do if the battery isn't plugged in.
       else:
         # We assume we're not charging unless we're polling for the conditions to stop charging.
         if current_load < AC_load_min_discharge:
+          log("Low AC load. Starting charging.")
           # Load is too low. Start EV charging and check for the conditions to stop charging.
           enable_charging()
           poll_for_charge_stop()
           disable_charging()
         else:
+          log("Load is too high. Waiting for load to drop.")
           time.sleep(300) # Load is too high, don't enable charging.
