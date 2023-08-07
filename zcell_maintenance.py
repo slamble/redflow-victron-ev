@@ -20,6 +20,7 @@ ZBM_min_discharge_level = 10 	      # Minimum percentage capacity for EV chargin
 AC_load_max_discharge = 2500          # Watts - the maximum load before the charger is turned off
 AC_load_min_discharge = 1000          # Watts - the minimum load; if the load is below that mark, the charger is turned on.
 ChargeCurrent = 6                     # Amps. Multiply by your voltage to get the watts (230*6 = 1380 watts in Australia.)
+AC_voltage = 230                      # Nominal voltage in your region.
 LoggingLevel = LogLevel.INFO
 
 # ===== User-adjustable parameters end here =====
@@ -159,6 +160,14 @@ while True:
         time.sleep(300) # Nothing we can do if the battery isn't plugged in.
       else:
         # We assume we're not charging unless we're polling for the conditions to stop charging.
+        current_charging_mode = charger_client.read_holding_registers(Reg_VictronEVSetChargingMode)
+        if current_charging_mode.registers[0] == EVChargingState.MANUAL:
+          # The car's already charging. Check the draw and reduce it from current load.
+          current_charge_current = charger_client.read_holding_registers(Reg_VictronEVChargeCurrent)
+          current_charge_current = current_charge_current.registers[0]
+          log("Currently charging with current " +str(current_charge_current), LogLevel.WARNING)
+          charge_load = current_charge_current * AC_voltage
+          current_load = current_load - charge_load
         if current_load < AC_load_min_discharge:
           log("Low AC load. Starting charging.", LogLevel.INFO)
           # Load is too low. Start EV charging and check for the conditions to stop charging.
