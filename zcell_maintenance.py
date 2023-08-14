@@ -33,6 +33,7 @@ Reg_VictronEVChargeCurrent = 5016 # Set the charging current
 Reg_CerboACLoadL1 = 817 # Load on first phase (watts)
 Reg_CerboACLoadL2 = 818 # Load on second phase (watts)
 Reg_CerboACLoadL3 = 819 # Load on third phase (watts)
+Reg_ZCell_SOC = 0x0200  # State of charge (array of all ZCell units)
 
 from datetime import datetime
 
@@ -61,10 +62,8 @@ class EVStartStopCharging(int, Enum): # For register 5010
 
 
 charger_client = ModbusTcpClient(VictronEVChargerIP)
-charger_client.connect()
-
 cerbo_client = ModbusTcpClient(VictronCerboIP)
-cerbo_client.connect()
+zcell_client = ModbusTcpClient(ZBM_IP, unit_id=201)
 
 def get_zbm_status():
   data = requests.get('http://' + ZBM_IP + ':3000/rest/1.0/status')
@@ -72,23 +71,30 @@ def get_zbm_status():
   return json
 
 def enable_charging():
+  charger_client.connect()
   charger_client.write_register(Reg_VictronEVSetChargingMode, EVChargingState.MANUAL)
   charger_client.write_register(Reg_VictronEVChargeCurrent, ChargeCurrent)
   charger_client.write_register(Reg_VictronEVStartStopCharging, EVStartStopCharging.START)
+  charger_client.close()
 
 def disable_charging():
+  charger_client.connect()
   charger_client.write_register(Reg_VictronEVStartStopCharging, EVStartStopCharging.STOP)
   charger_client.write_register(Reg_VictronEVSetChargingMode, EVChargingState.AUTO)
+  charger_client.close()
 
 def get_current_load():
+  cerbo_client.connect()
   data = cerbo_client.read_holding_registers(Reg_CerboACLoadL1)
+  cerbo_client.close()
   return data.registers[0]
 
 def get_current_charge_level():
-  data = get_zbm_status()
+  zcell_client.connect()
+  data = zcell_client.read_holding_registers(Reg_ZCell_SOC)
+  zcell_client.close()
   # XXX: This is specific to the first ZBM, and probably should be adjusted to handle multiple ZBMs.
-  data = data["list"][0]["state_of_charge"]
-  return data
+  return data.registers[0]/10
 
 # - When is_stripping becomes true, start the charging.
 # - If the ZBM charge level is below min discharge level, stop the charging.
@@ -120,7 +126,9 @@ def poll_for_charge_stop():
     log("Current charge level is " + str(current_charge) + ", current load is " + str(current_load), LogLevel.INFO)
 
 def is_ev_plugged_in():
+  charger_client.connect()
   state = charger_client.read_holding_registers(Reg_VictronEVChargerState)
+  charger_client.close()
   data = state.registers[0]
   valid_states = [ EVChargerState.CONNECTED, EVChargerState.CHARGING, EVChargerState.WAITING_FOR_SUN, EVChargerState.WAITING_FOR_START ]
   if data in valid_states:
@@ -160,6 +168,7 @@ while True:
         time.sleep(300) # Nothing we can do if the battery isn't plugged in.
       else:
         # We assume we're not charging unless we're polling for the conditions to stop charging.
+        charger_client.connect()
         current_charging_mode = charger_client.read_holding_registers(Reg_VictronEVSetChargingMode)
         if current_charging_mode.registers[0] == EVChargingState.MANUAL:
           # The car's already charging. Check the draw and reduce it from current load.
@@ -168,6 +177,7 @@ while True:
           log("Currently charging with current " +str(current_charge_current), LogLevel.WARNING)
           charge_load = current_charge_current * AC_voltage
           current_load = current_load - charge_load
+        charger_client.close()
         if current_load < AC_load_min_discharge:
           log("Low AC load. Starting charging.", LogLevel.INFO)
           # Load is too low. Start EV charging and check for the conditions to stop charging.
