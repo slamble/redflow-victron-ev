@@ -1,9 +1,6 @@
 #!/usr/bin/python3
 
-#import pymodbus
-import requests
 import time
-#from pymodbus.client import ModbusTcpClient
 from pyModbusTCP.client import ModbusClient
 from enum import Enum
 
@@ -27,14 +24,36 @@ LoggingLevel = LogLevel.INFO
 # ===== User-adjustable parameters end here =====
 
 # ===== Modbus registers for manipulating the EV charger, and reading data from the Cerbo GX.
-Reg_VictronEVSetChargingMode = 5009 # Register for setting the charger mode
+Reg_VictronEVSetChargingMode = 5009   # Register for setting the charger mode
 Reg_VictronEVStartStopCharging = 5010 # Start/stop charging
-Reg_VictronEVChargerState = 5015 # Register for the EV charger state
-Reg_VictronEVChargeCurrent = 5016 # Set the charging current
-Reg_CerboACLoadL1 = 817 # Load on first phase (watts)
-Reg_CerboACLoadL2 = 818 # Load on second phase (watts)
-Reg_CerboACLoadL3 = 819 # Load on third phase (watts)
-Reg_ZCell_SOC = 0x0200  # State of charge (array of all ZCell units)
+Reg_VictronEVChargerState = 5015      # Register for the EV charger state
+Reg_VictronEVChargeCurrent = 5016     # Set the charging current
+Reg_CerboACLoadL1 = 817               # Load on first phase (watts)
+Reg_CerboACLoadL2 = 818               # Load on second phase (watts)
+Reg_CerboACLoadL3 = 819               # Load on third phase (watts)
+Reg_ZCell_InternalStatus1 = 0x2051    # First of ZCell internal flag registers
+                                      # (we don't use the others.)
+Reg_ZCell_SOC = 0x0200                # State of charge (list of all ZCell units)
+
+# ===== ZCell internal status flag bitmasks =====
+# Only FLAG_STRIPPING and FLAG_STRIP_REQUIRED are used by this code; the
+# others are here for completeness.
+FLAG_HIGH_TEMPERATURE = 1
+FLAG_HIGH_CURRENT = 2
+FLAG_LEAK_SENSOR_1_TRIPPED = 4
+FLAG_LEAK_SENSOR_2_TRIPPED = 8
+FLAG_BUS_TRIPPED = 16
+FLAG_FLAT = 32
+FLAG_STRIP_REQUIRED = 64
+FLAG_STRIPPING = 128
+FLAG_CHARGE_END = 256
+FLAG_DISCHARGE_END = 512
+FLAG_BUS_VOLTAGE_LOCKOUT = 1024
+FLAG_CURRENT_TRIPPED_LOCKOUT = 2048
+FLAG_CONFIGURATION_DATA_INVALID = 4096
+FLAG_PAUSE = 8192
+FLAG_STANDBY = 16384
+FLAG_REST = 32768
 
 from datetime import datetime
 
@@ -64,12 +83,7 @@ class EVStartStopCharging(int, Enum): # For register 5010
 
 charger_client = ModbusClient(VictronEVChargerIP)
 cerbo_client = ModbusClient(VictronCerboIP, unit_id=100)
-zcell_client = ModbusClient(ZBM_IP, unit_id=201)
-
-def get_zbm_status():
-  data = requests.get('http://' + ZBM_IP + ':3000/rest/1.0/status')
-  json = data.json()
-  return json
+zbm_client = ModbusClient(ZBM_IP, unit_id=201)
 
 def enable_charging():
   charger_client.open()
@@ -94,9 +108,9 @@ def get_current_load():
   return data[0]
 
 def get_current_charge_level():
-  zcell_client.open()
-  data = zcell_client.read_holding_registers(Reg_ZCell_SOC)
-  zcell_client.close()
+  zbm_client.open()
+  data = zbm_client.read_holding_registers(Reg_ZCell_SOC)
+  zbm_client.close()
   # XXX: This is specific to the first ZBM, and probably should be adjusted to handle multiple ZBMs.
   return data[0]/10
 
@@ -110,11 +124,16 @@ def get_current_charge_level():
 # check the load on all three and sum them.
 
 def is_stripping():
-  # XXX: Specific to the first ZBM.
-  # XXX: To Do: change to use Modbus. Unit ID = battery ID number; register
-  # 0x2051. Value is a flag - bitwise AND 128 to get stripping state.
-  data = get_zbm_status()
-  return data["list"][0]["is_stripping"]
+  # XXX: unit_id is the zcell RTU unit number. Should make this generic
+  # for multi-cell installations.
+  zcell_client = ModbusClient(ZBM_IP, unit_id = 1)
+  zcell_client.open()
+  data = zcell_client.read_holding_registers(Reg_ZCell_InternalStatus1)
+  is_stripping_flag = data[0] & (FLAG_STRIPPING | FLAG_STRIP_REQUIRED)
+  if is_stripping_flag != 0:
+    return True
+  else:
+    return False
 
 def poll_for_strip():
   while not is_stripping():
@@ -171,9 +190,8 @@ while True:
       # Maintenance is on, and the battery has enough charge.
       if not is_ev_plugged_in():
         log("EV is not plugged in.", LogLevel.WARNING)
-        time.sleep(300) # Nothing we can do if the battery isn't plugged in.
+        time.sleep(300) # Nothing we can do if the car isn't plugged in.
       else:
-        # We assume we're not charging unless we're polling for the conditions to stop charging.
         charger_client.open()
         current_charging_mode = charger_client.read_holding_registers(Reg_VictronEVSetChargingMode)
         if current_charging_mode[0] == EVChargingState.MANUAL:
