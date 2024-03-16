@@ -1,3 +1,15 @@
+# Important note
+
+This script is now defunct, and will no longer be maintained. Sadly, my
+Redflow battery died; because of the circumstances of its failure, I opted
+to accept Redflow's offer of a buyback. Hence, I no longer have a need for
+this script: I am now running a different brand of batteries that does not
+do a periodic maintenance discharge.
+
+I am keeping the repository available for those who might find it useful,
+but will not be maintaining it further. Feel free to fork it, extend it, etc.,
+as you see fit.
+
 # What is it?
 
 A utility to encourage Redflow batteries to discharge into an electric car, rather than the grid.

@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-import time
+import time, sys
 from pyModbusTCP.client import ModbusClient
 from enum import Enum
 
@@ -18,8 +18,11 @@ ZBM_min_discharge_level = 10 	      # Minimum percentage capacity for EV chargin
 AC_load_max_discharge = 2500          # Watts - the maximum load before the charger is turned off
 AC_load_min_discharge = 1000          # Watts - the minimum load; if the load is below that mark, the charger is turned on.
 ChargeCurrent = 6                     # Amps. Multiply by your voltage to get the watts (230*6 = 1380 watts in Australia.)
-AC_voltage = 230                      # Nominal voltage in your region.
 LoggingLevel = LogLevel.INFO
+VictronInverterUnitID = 227           # Modbus unit ID for the inverter. You can
+                                      # get this from the display panel:
+                                      # Settings -> Services -> Modbus-TCP ->
+                                      # Available services (look for com.victronenergy.vebus)
 
 # ===== User-adjustable parameters end here =====
 
@@ -31,9 +34,14 @@ Reg_VictronEVChargeCurrent = 5016     # Set the charging current
 Reg_CerboACLoadL1 = 817               # Load on first phase (watts)
 Reg_CerboACLoadL2 = 818               # Load on second phase (watts)
 Reg_CerboACLoadL3 = 819               # Load on third phase (watts)
+Reg_CerboOutputVoltageL1 = 15         # Output voltage on first phase
+Reg_CerboOutputVoltageL2 = 16         # Output voltage on second phase
+Reg_CerboOutputVoltageL3 = 17         # Output voltage on third phase
 Reg_ZCell_InternalStatus1 = 0x2051    # First of ZCell internal flag registers
                                       # (we don't use the others.)
 Reg_ZCell_SOC = 0x0200                # State of charge (list of all ZCell units)
+Reg_ZCell_Voltage = 0x9013            # Battery voltage (unit specific)
+Reg_ZCell_Current = 0x9014            # Battery current (unit specific)
 
 # ===== ZCell internal status flag bitmasks =====
 # Only FLAG_STRIPPING and FLAG_STRIP_REQUIRED are used by this code; the
@@ -83,6 +91,8 @@ class EVStartStopCharging(int, Enum): # For register 5010
 
 charger_client = ModbusClient(VictronEVChargerIP)
 cerbo_client = ModbusClient(VictronCerboIP, unit_id=100)
+# Is there any way to get this unit ID programmatically?
+inverter_client = ModbusClient(VictronCerboIP, unit_id=VictronInverterUnitID)
 zbm_client = ModbusClient(ZBM_IP, unit_id=201)
 
 def enable_charging():
@@ -107,6 +117,16 @@ def get_current_load():
   cerbo_client.close()
   return data[0]
 
+def get_current_discharge_rate(unit):
+  zcell_client = ModbusClient(ZBM_IP, unit_id = unit)
+  zcell_client.open()
+  voltage = zcell_client.read_holding_registers(Reg_ZCell_Voltage)
+  current = zcell_client.read_holding_registers(Reg_ZCell_Current)
+  if (current[0] > 32767):
+    current[0] = current[0] - 65536 # Signed, but it's returned as an unsigned
+                                    # value, so...
+  return voltage[0] * current[0] / 100
+
 def get_current_charge_level():
   zbm_client.open()
   data = zbm_client.read_holding_registers(Reg_ZCell_SOC)
@@ -123,10 +143,8 @@ def get_current_charge_level():
 # Strictly speaking, that's L1; L2 and 3 are on 818 and 819. Arguably should
 # check the load on all three and sum them.
 
-def is_stripping():
-  # XXX: unit_id is the zcell RTU unit number. Should make this generic
-  # for multi-cell installations.
-  zcell_client = ModbusClient(ZBM_IP, unit_id = 1)
+def is_stripping(unit):
+  zcell_client = ModbusClient(ZBM_IP, unit_id = unit)
   zcell_client.open()
   data = zcell_client.read_holding_registers(Reg_ZCell_InternalStatus1)
   is_stripping_flag = data[0] & (FLAG_STRIPPING | FLAG_STRIP_REQUIRED)
@@ -136,19 +154,47 @@ def is_stripping():
     return False
 
 def poll_for_strip():
-  while not is_stripping():
-    log("Not stripping, sleeping for five minutes.", LogLevel.INFO)
+  # XXX: unit_id is the zcell RTU unit number. Should make this generic
+  # for multi-cell installations.
+  while not is_stripping(1):
+    discharge = get_current_discharge_rate(1)
+    if (discharge < 0):
+      log_str = "Current charge rate: " + str(-discharge) + " watts."
+    else:
+      log_str = "Current discharge rate: " + str(discharge) + " watts."
+    log("Not stripping, sleeping for five minutes. " + log_str, LogLevel.INFO)
     time.sleep(300) # Wait five minutes.
 
 def poll_for_charge_stop():
   current_charge = get_current_charge_level()
   current_load = get_current_load()
-  log("Current charge level is " + str(current_charge) + ", current load is " + str(current_load), LogLevel.INFO)
-  while (current_charge >= ZBM_min_discharge_level) and (current_load <= AC_load_max_discharge):
+  discharge = get_current_discharge_rate(1)
+  if (discharge < 0):
+    log_str = ", current charge rate: " + str(-discharge) + " watts."
+  else:
+    log_str = ", current discharge rate: " + str(discharge) + " watts."
+  # Really need to get AC grid draw as well - if that exceeds more than
+  # a few hundred watts, that should be the signal to stop the car charger.
+  # Knowing the current load and the discharge rate is good, but it's not a
+  # 100% reliable metric (eg: if there's solar energy coming in - though
+  # the maintenance SHOULD be happening at night, it's not 100% guaranteed.)
+  #
+  # XXX
+  log("Current charge level is " + str(current_charge) + ", current load is " + str(current_load) + log_str, LogLevel.INFO)
+  while (current_charge >= ZBM_min_discharge_level) and (current_load <= AC_load_max_discharge) and (discharge > current_load):
     time.sleep(300)
     current_charge = get_current_charge_level()
     current_load = get_current_load()
-    log("Current charge level is " + str(current_charge) + ", current load is " + str(current_load), LogLevel.INFO)
+    discharge = get_current_discharge_rate(1)
+    if (discharge < 0):
+      log_str = ", current charge rate: " + str(-discharge) + " watts."
+    else:
+      log_str = ", current discharge rate: " + str(discharge) + " watts."
+    log("Current charge level is " + str(current_charge) + ", current load is " + str(current_load) + log_str, LogLevel.INFO)
+  if (discharge < current_load):
+    return False
+  else:
+    return True
 
 def is_ev_plugged_in():
   charger_client.open()
@@ -176,12 +222,16 @@ log("Initiating poll for maintenance cycle.", LogLevel.INFO)
 while True:
   poll_for_strip()
   log("Maintenance time has arrived; checking for valid charging conditions.", LogLevel.INFO)
-  while is_stripping():
+  # XXX: unit_id is the zcell RTU unit number. Should make this generic
+  # for multi-cell installations.
+  while is_stripping(1):
     current_charge = get_current_charge_level()
     current_load = get_current_load()
     if current_charge < ZBM_min_discharge_level:
       log("Battery level has dropped below threshold. Waiting for maintenance to finish.", LogLevel.INFO)
-      while is_stripping():
+      # XXX: unit_id is the zcell RTU unit number. Should make this generic
+      # for multi-cell installations.
+      while is_stripping(1):
         # We could just sleep and leave the is_stripping() check to the outer loop, but we know the battery
         # has dropped to a low level of charge. Loop here until maintenance finishes. One hour sleep is a good
         # compromise here.
@@ -199,15 +249,25 @@ while True:
           current_charge_current = charger_client.read_holding_registers(Reg_VictronEVChargeCurrent)
           current_charge_current = current_charge_current[0]
           log("Currently charging with current " +str(current_charge_current), LogLevel.WARNING)
-          charge_load = current_charge_current * AC_voltage
+
+          inverter_client.open()
+          data = inverter_client.read_holding_registers(Reg_CerboOutputVoltageL1)
+          inverter_client.close()
+          current_charge_voltage = data[0] / 10
+          log("Charge voltage " + str(current_charge_voltage) + " volts", LogLevel.WARNING)
+
+          charge_load = current_charge_current * current_charge_voltage
           current_load = current_load - charge_load
         charger_client.close()
         if current_load < AC_load_min_discharge:
           log("Low AC load. Starting charging.", LogLevel.INFO)
           # Load is too low. Start EV charging and check for the conditions to stop charging.
           enable_charging()
-          poll_for_charge_stop()
+          x = poll_for_charge_stop()
           disable_charging()
+          if not x:
+            log("Charging stopped because discharge was too low. Exiting script.", LogLevel.WARNING) # Cheap hack.
+            sys.exit(0)
         else:
           log("Load is too high. Waiting for load to drop.", LogLevel.INFO)
           time.sleep(300) # Load is too high, don't enable charging.
